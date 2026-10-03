@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Pocket Ledger</title>
+  <meta name="description" content="Track your monthly pocket money, log where it goes, and get spending insights and cautions.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Figtree:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">Pocket Ledger</span>
+      </div>
+      <div class="month-picker">
+        <button class="icon-btn" id="prevMonth" aria-label="Previous month">&#8249;</button>
+        <label for="monthInput" class="sr-only">Month</label>
+        <input type="month" id="monthInput">
+        <button class="icon-btn" id="nextMonth" aria-label="Next month">&#8250;</button>
+      </div>
+    </div>
+    <nav class="wrap tabs" role="tablist" aria-label="Sections">
+      <button role="tab" class="tab" data-tab="overview" aria-selected="true">Overview</button>
+      <button role="tab" class="tab" data-tab="expenses" aria-selected="false">Expenses</button>
+      <button role="tab" class="tab" data-tab="stats" aria-selected="false">Stats</button>
+      <button role="tab" class="tab" data-tab="guide" aria-selected="false">Guide</button>
+      <button role="tab" class="tab" data-tab="settings" aria-selected="false">Settings</button>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <div id="sampleBanner" class="banner" hidden>
+      <span>You're looking at example data so you can see how it works.</span>
+      <button class="btn btn-small" id="clearSample">Clear examples and start fresh</button>
+    </div>
+
+    <!-- OVERVIEW -->
+    <section class="panel" data-panel="overview">
+      <div class="grid-2">
+        <form class="card" id="incomeForm" autocomplete="off">
+          <h2>Pocket money for <span class="js-month-label"></span></h2>
+          <p class="hint">Enter what you received this month. Add gifts or extra earnings separately.</p>
+          <div class="field">
+            <label for="allowanceInput">Monthly pocket money</label>
+            <div class="money-input"><span class="js-cur"></span><input type="number" id="allowanceInput" min="0" step="0.01" inputmode="decimal" placeholder="0"></div>
+          </div>
+          <div class="field">
+            <label for="savingTargetInput">Amount I want to save this month</label>
+            <div class="money-input"><span class="js-cur"></span><input type="number" id="savingTargetInput" min="0" step="0.01" inputmode="decimal" placeholder="0"></div>
+          </div>
+          <button class="btn" type="submit">Save month</button>
+
+          <details class="extra">
+            <summary>Extra money this month (<span id="extraCount">0</span>)</summary>
+            <ul class="mini-list" id="extraList"></ul>
+            <div class="row">
+              <label for="extraNote" class="sr-only">Where it came from</label>
+              <input type="text" id="extraNote" placeholder="e.g. Birthday gift">
+              <label for="extraAmount" class="sr-only">Amount</label>
+              <input type="number" id="extraAmount" min="0" step="0.01" placeholder="Amount">
+              <button class="btn btn-ghost" type="button" id="addExtra">Add</button>
+            </div>
+          </details>
+        </form>
+
+        <div class="card summary" id="summaryCard">
+          <h2>This month at a glance</h2>
+          <div class="meter-wrap">
+            <div class="meter" id="budgetMeter" role="img" aria-label="Budget used">
+              <div class="meter-fill" id="meterFill"></div>
+              <div class="meter-target" id="meterTarget" title="Spending limit that keeps your saving goal"></div>
+            </div>
+            <div class="meter-legend">
+              <span id="meterText"></span>
+              <span id="meterStatus" class="pill"></span>
+            </div>
+          </div>
+          <dl class="kv">
+            <div><dt>Money in</dt><dd id="kvIn"></dd></div>
+            <div><dt>Spent</dt><dd id="kvSpent"></dd></div>
+            <div><dt>Left</dt><dd id="kvLeft"></dd></div>
+            <div><dt>Safe to spend per day</dt><dd id="kvDaily"></dd></div>
+          </dl>
+          <div class="goal" id="goalBox"></div>
+        </div>
+      </div>
+
+      <form class="card" id="quickAdd" autocomplete="off">
+        <h2>Note down an expense</h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="expAmount">Amount</label>
+            <div class="money-input"><span class="js-cur"></span><input type="number" id="expAmount" min="0.01" step="0.01" inputmode="decimal" required placeholder="0"></div>
+          </div>
+          <div class="field">
+            <label for="expCategory">Spent on</label>
+            <select id="expCategory" required></select>
+          </div>
+          <div class="field">
+            <label for="expDate">Date</label>
+            <input type="date" id="expDate" required>
+          </div>
+          <div class="field field-wide">
+            <label for="expReason">Reason / what for</label>
+            <input type="text" id="expReason" maxlength="120" placeholder="e.g. Lunch with friends after class" required>
+          </div>
+          <fieldset class="field seg">
+            <legend>Was it a need or a want?</legend>
+            <label><input type="radio" name="expType" value="need" checked> Need</label>
+            <label><input type="radio" name="expType" value="want"> Want</label>
+          </fieldset>
+          <div class="field">
+            <label for="expMethod">Paid with</label>
+            <select id="expMethod">
+              <option>Cash</option><option>UPI / Wallet</option><option>Card</option><option>Other</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn" type="submit" id="expSubmit">Add expense</button>
+          <button class="btn btn-ghost" type="button" id="expCancel" hidden>Cancel edit</button>
+          <span class="toast" id="toast" role="status" aria-live="polite"></span>
+        </div>
+      </form>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Top cautions</h2>
+          <button class="link-btn" data-goto="guide">See full guide &rarr;</button>
+        </div>
+        <ul class="insights" id="topInsights"></ul>
+      </div>
+    </section>
+
+    <!-- EXPENSES -->
+    <section class="panel" data-panel="expenses" hidden>
+      <div class="card">
+        <div class="card-head wrap-row">
+          <h2>Expenses in <span class="js-month-label"></span></h2>
+          <div class="filters">
+            <label for="filterText" class="sr-only">Search</label>
+            <input type="search" id="filterText" placeholder="Search reason…">
+            <label for="filterCat" class="sr-only">Category</label>
+            <select id="filterCat"></select>
+            <label for="filterType" class="sr-only">Need or want</label>
+            <select id="filterType">
+              <option value="">Needs &amp; wants</option>
+              <option value="need">Needs only</option>
+              <option value="want">Wants only</option>
+            </select>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="ledger">
+            <thead>
+              <tr><th>Date</th><th>Category</th><th>Reason</th><th>Type</th><th class="num">Amount</th><th><span class="sr-only">Actions</span></th></tr>
+            </thead>
+            <tbody id="expenseRows"></tbody>
+            <tfoot><tr><td colspan="4">Total shown</td><td class="num" id="expenseTotal"></td><td></td></tr></tfoot>
+          </table>
+        </div>
+        <p class="empty" id="expenseEmpty" hidden>No expenses noted for this month yet. Add one from the Overview tab.</p>
+      </div>
+    </section>
+
+    <!-- STATS -->
+    <section class="panel" data-panel="stats" hidden>
+      <div class="tiles" id="statTiles"></div>
+
+      <div class="grid-2">
+        <figure class="card chart-card">
+          <figcaption><h2>Where your money went</h2><p class="hint">Share of this month's spending by category</p></figcaption>
+          <div class="chart" id="catChart"></div>
+        </figure>
+        <figure class="card chart-card">
+          <figcaption><h2>Spending pace</h2><p class="hint">Running total vs. the even pace that keeps your saving goal</p></figcaption>
+          <div class="chart" id="paceChart"></div>
+        </figure>
+      </div>
+
+      <div class="grid-2">
+        <figure class="card chart-card">
+          <figcaption><h2>Needs vs. wants</h2><p class="hint">How much of this month's spending was optional</p></figcaption>
+          <div class="chart" id="needWantChart"></div>
+        </figure>
+        <figure class="card chart-card">
+          <figcaption><h2>Spending by weekday</h2><p class="hint">Total spent on each day of the week this month</p></figcaption>
+          <div class="chart" id="weekdayChart"></div>
+        </figure>
+      </div>
+
+      <figure class="card chart-card">
+        <figcaption><h2>Month by month</h2><p class="hint">Spent and saved for the last 6 months</p></figcaption>
+        <div class="chart" id="historyChart"></div>
+      </figure>
+
+      <div class="card">
+        <h2>Category limits</h2>
+        <p class="hint">Set a limit for a category to get a caution when you get close. Leave blank for no limit.</p>
+        <div class="table-scroll">
+          <table class="ledger" id="limitTable">
+            <thead><tr><th>Category</th><th class="num">Spent</th><th class="num">Last month</th><th>Limit</th><th>Status</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- GUIDE -->
+    <section class="panel" data-panel="guide" hidden>
+      <div class="card guide-hero" id="guideHero"></div>
+      <div class="card">
+        <h2>Cautions and advice for <span class="js-month-label"></span></h2>
+        <ul class="insights" id="allInsights"></ul>
+      </div>
+      <div class="card">
+        <h2>Your biggest expenses</h2>
+        <ol class="biggest" id="biggestList"></ol>
+      </div>
+      <div class="card">
+        <h2>Habits that help</h2>
+        <ul class="tips">
+          <li><strong>Pay yourself first.</strong> Move your saving amount aside the day pocket money arrives, then spend from what's left.</li>
+          <li><strong>Use a 24-hour rule for wants.</strong> If it isn't a need, wait a day. Most impulse buys lose their pull.</li>
+          <li><strong>Watch the small, frequent ones.</strong> Five snacks a week often costs more than one big purchase.</li>
+          <li><strong>Give every category a limit.</strong> Start with last month's spending and trim 10% from your top category.</li>
+          <li><strong>Check in weekly.</strong> Open the Stats tab every Sunday to see if your pace is on track.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="panel" data-panel="settings" hidden>
+      <div class="grid-2">
+        <form class="card" id="settingsForm" autocomplete="off">
+          <h2>Preferences</h2>
+          <div class="field">
+            <label for="currencySelect">Currency</label>
+            <select id="currencySelect"></select>
+          </div>
+          <div class="field">
+            <label for="goalName">Long-term saving goal</label>
+            <input type="text" id="goalName" maxlength="60" placeholder="e.g. New headphones">
+          </div>
+          <div class="field">
+            <label for="goalAmount">Goal amount</label>
+            <div class="money-input"><span class="js-cur"></span><input type="number" id="goalAmount" min="0" step="0.01" placeholder="0"></div>
+          </div>
+          <button class="btn" type="submit">Save preferences</button>
+        </form>
+
+        <div class="card">
+          <h2>Categories</h2>
+          <ul class="chips" id="catChips"></ul>
+          <div class="row">
+            <label for="newCat" class="sr-only">New category</label>
+            <input type="text" id="newCat" maxlength="30" placeholder="Add a category">
+            <button class="btn btn-ghost" type="button" id="addCat">Add</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Your data</h2>
+        <p class="hint">Everything is saved only in this browser. Download a backup now and then so you never lose it.</p>
+        <div class="row wrap-row">
+          <button class="btn btn-ghost" type="button" id="exportJson">Download backup (.json)</button>
+          <button class="btn btn-ghost" type="button" id="exportCsv">Download expenses (.csv)</button>
+          <label class="btn btn-ghost file-btn" for="importJson">Restore from backup</label>
+          <input type="file" id="importJson" accept="application/json,.json" class="sr-only">
+        </div>
+        <div class="danger">
+          <button class="btn btn-danger" type="button" id="resetAll">Delete all data</button>
+          <span id="resetConfirm" hidden>
+            Are you sure? This can't be undone.
+            <button class="btn btn-danger btn-small" type="button" id="resetYes">Yes, delete</button>
+            <button class="btn btn-ghost btn-small" type="button" id="resetNo">Keep my data</button>
+          </span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>
