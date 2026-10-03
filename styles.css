@@ -330,3 +330,23 @@ input:focus-visible, select:focus-visible, button:focus-visible, .file-btn:focus
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* Account */
+.banner-quiet { background: var(--surface); border: 1px dashed var(--line-strong); }
+.acct-chip {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  font: 600 0.82rem var(--font-body); padding: 7px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink);
+}
+.acct-chip::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.acct-chip.out { border-color: var(--accent); color: var(--accent); }
+.acct-chip.out::before { display: none; }
+.acct-chip.synced::before { background: var(--good); }
+.acct-chip.syncing::before { background: var(--warning); }
+.acct-chip.error::before { background: var(--critical); }
+.auth-form { display: grid; gap: 14px; max-width: 460px; }
+.auth-msg { margin: 0; font-size: 0.9rem; color: var(--good-ink); min-height: 1.2em; }
+.auth-msg:empty { display: none; }
+.auth-msg.err { color: var(--critical-ink); }
+.btn:disabled { opacity: .6; cursor: progress; }
+#acctSignedOut { display: grid; gap: 14px; }

@@ -9,6 +9,15 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Figtree:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
   <link rel="stylesheet" href="styles.css">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Pocket Ledger">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="theme-color" content="#f4f6f5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0f1312" media="(prefers-color-scheme: dark)">
 </head>
 <body>
   <header class="topbar">
@@ -17,6 +26,7 @@
         <span class="brand-mark" aria-hidden="true"></span>
         <span class="brand-name">Pocket Ledger</span>
       </div>
+      <button type="button" class="acct-chip out" id="acctChip" hidden>Sign in</button>
       <div class="month-picker">
         <button class="icon-btn" id="prevMonth" aria-label="Previous month">&#8249;</button>
         <label for="monthInput" class="sr-only">Month</label>
@@ -34,9 +44,12 @@
   </header>
 
   <main class="wrap">
-    <div id="sampleBanner" class="banner" hidden>
-      <span>You're looking at example data so you can see how it works.</span>
-      <button class="btn btn-small" id="clearSample">Clear examples and start fresh</button>
+    <div id="signinBanner" class="banner" hidden>
+      <span>Sign in to save your money notes online and open them on any device.</span>
+      <button class="btn btn-small" type="button" data-goto="settings" data-focus="#authEmail">Sign in or create account</button>
+    </div>
+    <div id="welcome" class="banner banner-quiet" hidden>
+      <span><strong>Welcome to Pocket Ledger.</strong> Start by entering this month's pocket money below. Then note down each thing you spend money on.</span>
     </div>
 
     <!-- OVERVIEW -->
@@ -236,6 +249,45 @@
 
     <!-- SETTINGS -->
     <section class="panel" data-panel="settings" hidden>
+      <div class="card" id="accountCard">
+        <div class="card-head">
+          <h2>Account</h2>
+          <span class="pill none" id="acctPill" hidden></span>
+        </div>
+        <p class="hint" id="acctNotSetUp">Online saving is not switched on for this copy of the site, so your data is saved in this browser only.</p>
+        <div id="acctSignedOut" hidden>
+          <p class="hint">Sign in to save your money notes online. They stay safe even if you clear your browser, and you can open them on any device.</p>
+          <form id="authForm" class="auth-form" novalidate>
+            <div class="field">
+              <label for="authEmail">Email</label>
+              <input type="email" id="authEmail" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" required>
+            </div>
+            <div class="field">
+              <label for="authPassword">Password</label>
+              <input type="password" id="authPassword" autocomplete="current-password" minlength="6" required>
+            </div>
+            <div class="form-actions">
+              <button class="btn" type="submit" id="signInBtn">Sign in</button>
+              <button class="btn btn-ghost" type="button" id="signUpBtn">Create account</button>
+              <button class="link-btn" type="button" id="forgotBtn">Forgot password?</button>
+            </div>
+          </form>
+        </div>
+        <form id="acctRecovery" class="auth-form" hidden>
+          <p class="hint">Choose a new password for your account.</p>
+          <div class="field">
+            <label for="newPassword">New password</label>
+            <input type="password" id="newPassword" autocomplete="new-password" minlength="6" required>
+          </div>
+          <button class="btn" type="submit">Save new password</button>
+        </form>
+        <div id="acctSignedIn" class="row" hidden>
+          <span>Signed in as <strong id="acctEmail"></strong></span>
+          <button class="btn btn-ghost btn-small" type="button" id="signOutBtn">Sign out</button>
+        </div>
+        <p class="auth-msg" id="authMsg" role="status" aria-live="polite"></p>
+      </div>
+
       <div class="grid-2">
         <form class="card" id="settingsForm" autocomplete="off">
           <h2>Preferences</h2>
@@ -287,6 +339,8 @@
   </main>
 
   <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+  <script src="vendor/supabase.js"></script>
+  <script src="config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

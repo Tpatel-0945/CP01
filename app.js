@@ -1,5 +1,6 @@
 /* Pocket Ledger: pocket money, expenses and spending insights.
-   All data lives in localStorage under STORE_KEY. No build step, no dependencies. */
+   Data is cached in localStorage under STORE_KEY. When signed in, it is also
+   saved to Supabase (see config.js and supabase/schema.sql). No build step. */
 (function () {
   'use strict';
 
@@ -97,9 +98,19 @@
     } catch (e) { /* storage blocked or corrupt: fall through */ }
     return null;
   }
-  function save() {
+  function saveLocal() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
+  }
+  function save() {
+    saveLocal();
     cloudPush();
+    acctPush();
+  }
+  function hasData(s) {
+    return s.expenses.length > 0 || Object.keys(s.months).some(function (k) {
+      var m = s.months[k];
+      return num(m.allowance) > 0 || num(m.savingTarget) > 0 || (m.extras || []).length > 0;
+    });
   }
 
   /* ---------- account sync (only when hosted as a Claude artifact) ----------
@@ -135,11 +146,197 @@
   }
   function setSyncStatus(st) {
     cloud.status = st;
+    renderSyncText();
+  }
+  function renderSyncText() {
     var el = document.getElementById('syncStatus');
     if (!el) return;
-    el.textContent = st === 'cloud' ? 'Saved to your Claude account. Open this page on any device where you are signed in to see the same data.'
-      : st === 'error' ? 'Could not save to your account just now. Your latest changes are kept on this device and will sync after your next change.'
-      : 'Saved only in this browser. Download a backup now and then so you never lose it.';
+    var t;
+    if (acct.user) {
+      t = acct.status === 'error' ? 'Your latest changes are saved on this device but not online yet. They will upload when you are back online.'
+        : 'Saved online to your account. Sign in on any device to see the same data.';
+    } else if (cloud.status === 'cloud') {
+      t = 'Saved to your Claude account. Open this page on any device where you are signed in to see the same data.';
+    } else if (cloud.status === 'error') {
+      t = 'Could not save to your account just now. Your latest changes are kept on this device and will sync after your next change.';
+    } else {
+      t = 'Saved only in this browser' + (acctEnabled() ? '. Sign in above to save online.' : '.') + ' Download a backup now and then so you never lose it.';
+    }
+    el.textContent = t;
+  }
+
+  /* ---------- online account (Supabase) ----------
+     Rows: ledger_settings (one per person), ledger_months (one per month),
+     ledger_expenses (one per expense). Every change is diffed against the
+     last synced copy so only changed rows are sent. */
+  var CONFIG = window.POCKET_LEDGER_CONFIG || {};
+  var OWNER_KEY = STORE_KEY + '.owner';
+  var acct = { client: null, user: null, synced: null, chain: Promise.resolve(), timer: null, status: 'signedout', loading: false, recovery: false };
+  function acctEnabled() {
+    var inClaude = window.claude && typeof window.claude.use === 'function';
+    return !inClaude && !!(CONFIG.supabaseUrl && CONFIG.supabaseKey && window.supabase && window.supabase.createClient);
+  }
+  function getOwner() { try { return localStorage.getItem(OWNER_KEY); } catch (e) { return null; } }
+  function setOwner(id) { try { if (id) localStorage.setItem(OWNER_KEY, id); else localStorage.removeItem(OWNER_KEY); } catch (e) { /* ignore */ } }
+  function chunk(arr, n) { var out = []; for (var i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; }
+
+  function rowsOf(s, uid) {
+    var out = {};
+    out['s:me'] = { user_id: uid, currency: s.settings.currency, goal_name: s.settings.goalName || '', goal_amount: num(s.settings.goalAmount), categories: s.settings.categories, limits: s.settings.limits || {} };
+    Object.keys(s.months).forEach(function (k) {
+      var m = s.months[k];
+      out['m:' + k] = { user_id: uid, month: k, allowance: num(m.allowance), saving_target: num(m.savingTarget), extras: m.extras || [] };
+    });
+    s.expenses.forEach(function (e) {
+      out['e:' + e.id] = { user_id: uid, id: e.id, date: e.date, amount: e.amount, category: e.category, reason: e.reason, type: e.type, method: e.method };
+    });
+    return out;
+  }
+  function stringsOf(rows) { var o = {}; Object.keys(rows).forEach(function (k) { o[k] = JSON.stringify(rows[k]); }); return o; }
+  function stateFromRows(settings, months, expenses, fallbackCurrency) {
+    var raw = { settings: {}, months: {}, expenses: [] };
+    if (settings) raw.settings = { currency: settings.currency, goalName: settings.goal_name, goalAmount: settings.goal_amount, categories: settings.categories, limits: settings.limits };
+    else raw.settings = { currency: fallbackCurrency };
+    months.forEach(function (m) { raw.months[m.month] = { allowance: num(m.allowance), savingTarget: num(m.saving_target), extras: Array.isArray(m.extras) ? m.extras : [] }; });
+    raw.expenses = expenses.map(function (e) { return { id: e.id, date: String(e.date).slice(0, 10), amount: num(e.amount), category: e.category, reason: e.reason, type: e.type, method: e.method }; });
+    return normalize(raw);
+  }
+  function mergeInto(server, local) {
+    var merged = JSON.parse(JSON.stringify(server));
+    var ids = {};
+    merged.expenses.forEach(function (e) { ids[e.id] = true; });
+    local.expenses.forEach(function (e) { if (!ids[e.id]) merged.expenses.push(e); });
+    Object.keys(local.months).forEach(function (k) { if (!merged.months[k]) merged.months[k] = local.months[k]; });
+    return normalize(merged);
+  }
+  function fetchAll(table, uid) {
+    var size = 1000, out = [];
+    function page(from) {
+      return acct.client.from(table).select('*').eq('user_id', uid).range(from, from + size - 1).then(function (r) {
+        if (r.error) throw r.error;
+        out = out.concat(r.data || []);
+        return (r.data || []).length === size ? page(from + size) : out;
+      });
+    }
+    return page(0);
+  }
+  function friendlyDbError(err) {
+    var msg = (err && (err.message || err.error_description)) || '';
+    if (/ledger_|PGRST205|42P01|schema cache/i.test(msg + (err && err.code))) return 'The online database is not set up yet. Run supabase/schema.sql in your Supabase SQL Editor.';
+    if (/fetch|network|Failed/i.test(msg)) return 'You seem to be offline. Your changes are saved on this device and will upload later.';
+    return 'Could not reach the online database: ' + msg;
+  }
+  function acctLoad(user) {
+    var uid = user.id;
+    acct.loading = true;
+    setAcctStatus('syncing');
+    return Promise.all([fetchAll('ledger_settings', uid), fetchAll('ledger_months', uid), fetchAll('ledger_expenses', uid)]).then(function (r) {
+      if (!acct.user || acct.user.id !== uid) return;
+      var owner = getOwner();
+      var serverEmpty = !r[0].length && !r[1].length && !r[2].length;
+      if (serverEmpty) {
+        // New account: upload whatever this device already has (unless it belongs to someone else)
+        if (owner && owner !== uid) state = emptyState(state.settings.currency);
+        acct.synced = {};
+      } else {
+        var server = stateFromRows(r[0][0], r[1], r[2], state.settings.currency);
+        acct.synced = stringsOf(rowsOf(server, uid));
+        // Notes made on this device before signing in are added to the account, not lost
+        state = (!owner && hasData(state)) ? mergeInto(server, state) : server;
+      }
+      setOwner(uid);
+      fmtCache = {};
+      acct.loading = false;
+      saveLocal();
+      render();
+      acctPush(true);
+    }).catch(function (err) {
+      acct.loading = false;
+      setAcctStatus('error', friendlyDbError(err));
+    });
+  }
+  function acctPush(now) {
+    if (!acct.client || !acct.user || acct.loading || !acct.synced) return;
+    clearTimeout(acct.timer);
+    acct.timer = setTimeout(function () {
+      acct.chain = acct.chain.then(acctPushStep).catch(function (err) { setAcctStatus('error', friendlyDbError(err)); });
+    }, now ? 0 : 400);
+  }
+  function acctPushStep() {
+    if (!acct.user || !acct.synced) return;
+    var uid = acct.user.id, rows = rowsOf(state, uid), str = stringsOf(rows), prev = acct.synced;
+    var up = { s: [], m: [], e: [] }, del = { m: [], e: [] };
+    Object.keys(rows).forEach(function (k) { if (prev[k] !== str[k]) up[k[0]].push(rows[k]); });
+    Object.keys(prev).forEach(function (k) { if (!(k in rows) && del[k[0]]) del[k[0]].push(k.slice(2)); });
+    if (!up.s.length && !up.m.length && !up.e.length && !del.m.length && !del.e.length) { setAcctStatus('synced'); return; }
+    setAcctStatus('syncing');
+    var c = acct.client, ops = [];
+    if (up.s.length) ops.push(c.from('ledger_settings').upsert(up.s[0], { onConflict: 'user_id' }));
+    if (up.m.length) ops.push(c.from('ledger_months').upsert(up.m, { onConflict: 'user_id,month' }));
+    chunk(up.e, 500).forEach(function (part) { ops.push(c.from('ledger_expenses').upsert(part, { onConflict: 'user_id,id' })); });
+    if (del.m.length) ops.push(c.from('ledger_months').delete().eq('user_id', uid).in('month', del.m));
+    chunk(del.e, 200).forEach(function (part) { ops.push(c.from('ledger_expenses').delete().eq('user_id', uid).in('id', part)); });
+    return Promise.all(ops).then(function (res) {
+      for (var i = 0; i < res.length; i++) if (res[i].error) throw res[i].error;
+      if (acct.user && acct.user.id === uid) acct.synced = str;
+      setAcctStatus('synced');
+    });
+  }
+  function setAcctStatus(st, msg) {
+    acct.status = st;
+    if (msg) authMsg(msg, st === 'error');
+    renderAccount();
+  }
+  function authMsg(text, isError) {
+    var el = document.getElementById('authMsg');
+    if (!el) return;
+    el.textContent = text || '';
+    el.classList.toggle('err', !!isError);
+  }
+  function renderAccount() {
+    var on = acctEnabled();
+    var card = $('#accountCard'), chip = $('#acctChip');
+    card.hidden = false;
+    $('#acctNotSetUp').hidden = on;
+    $('#acctSignedOut').hidden = !on || !!acct.user || acct.recovery;
+    $('#acctRecovery').hidden = !on || !acct.recovery;
+    $('#acctSignedIn').hidden = !on || !acct.user || acct.recovery;
+    if (acct.user) setText('acctEmail', acct.user.email || '');
+    $('#signinBanner').hidden = !on || !!acct.user || view.tab !== 'overview';
+    chip.hidden = !on;
+    var label = !acct.user ? 'Sign in' : acct.status === 'syncing' ? 'Saving…' : acct.status === 'error' ? 'Not saved online' : 'Saved online';
+    chip.textContent = label;
+    chip.className = 'acct-chip ' + (!acct.user ? 'out' : acct.status);
+    var pill = $('#acctPill');
+    pill.hidden = !on;
+    pill.className = 'pill ' + (!acct.user ? 'none' : acct.status === 'error' ? 'over' : acct.status === 'syncing' ? 'warn' : 'good');
+    pill.textContent = !acct.user ? 'Signed out' : label;
+    renderSyncText();
+  }
+  function acctInit() {
+    if (!acctEnabled()) { renderAccount(); return; }
+    try {
+      acct.client = window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabaseKey, {
+        auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'implicit' }
+      });
+    } catch (e) { acct.client = null; renderAccount(); return; }
+    acct.client.auth.onAuthStateChange(function (event, session) {
+      var u = session && session.user;
+      if (event === 'PASSWORD_RECOVERY') { acct.recovery = true; setTab('settings'); }
+      if (u && (!acct.user || acct.user.id !== u.id)) {
+        acct.user = u;
+        // Supabase asks callers not to await its own calls inside this callback
+        setTimeout(function () { acctLoad(u); }, 0);
+      } else if (u) {
+        acct.user = u;
+      } else if (!u && acct.user) {
+        acct.user = null; acct.synced = null; acct.status = 'signedout';
+      }
+      renderAccount();
+    });
+    window.addEventListener('online', function () { acctPush(true); });
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible' && acct.status === 'error') acctPush(true); });
+    renderAccount();
   }
   function cloudInit() {
     if (!window.claude || typeof window.claude.use !== 'function') return;
@@ -162,10 +359,11 @@
             var merged = JSON.parse(JSON.stringify(meta));
             merged.expenses = JSON.parse(JSON.stringify(expenses));
             state = normalize(merged);
+            state.sample = false;
             fmtCache = {};
             try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
             render();
-          } else if (!state.sample) {
+          } else if (hasData(state)) {
             cloudPush();
           }
           setSyncStatus('cloud');
@@ -181,60 +379,9 @@
   }
   function peekMonth(key) { return state.months[key] || { allowance: 0, savingTarget: 0, extras: [] }; }
 
-  /* ---------- sample data ---------- */
-  var SAMPLE_ALLOWANCE = { INR: 4000, JPY: 20000, PKR: 10000, NPR: 6000, BDT: 5000, LKR: 12000, NGN: 30000, KES: 5000, PHP: 2500 };
-  function sampleState(currency) {
-    var s = emptyState(currency);
-    s.sample = true;
-    var allowance = SAMPLE_ALLOWANCE[currency] || 200;
-    var unit = allowance / 100; // amounts below are in "% of allowance"
-    var seed = 7;
-    function rnd() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
-    var templates = [
-      [3, 'Food & Snacks', 'Samosa and chai at the canteen', 'want'],
-      [5, 'Food & Snacks', 'Lunch with friends after class', 'want'],
-      [2, 'Food & Snacks', 'Chips and a cold drink', 'want'],
-      [4, 'Transport', 'Bus pass top-up', 'need'],
-      [2.5, 'Transport', 'Auto ride home', 'need'],
-      [9, 'Entertainment', 'Movie ticket and popcorn', 'want'],
-      [6, 'Entertainment', 'Game top-up', 'want'],
-      [14, 'Shopping', 'New T-shirt', 'want'],
-      [6, 'Education', 'Notebooks and pens', 'need'],
-      [10, 'Mobile & Internet', 'Monthly phone recharge', 'need'],
-      [8, 'Gifts', "Friend's birthday gift", 'want'],
-      [3, 'Health', 'Pharmacy', 'need']
-    ];
-    var thisKey = currentMonthKey();
-    [-2, -1, 0].forEach(function (delta) {
-      var key = shiftMonth(thisKey, delta);
-      s.months[key] = { allowance: allowance, savingTarget: round2(allowance * 0.2), extras: [] };
-      if (delta === -1) s.months[key].extras.push({ id: uid(), note: 'Birthday money from grandparents', amount: round2(allowance * 0.25) });
-      var lastDay = delta === 0 ? new Date().getDate() : daysInMonth(key);
-      var count = delta === 0 ? Math.max(4, Math.round(lastDay * 0.55)) : 13 - delta * 2;
-      // Fixed monthly items first
-      s.expenses.push({ id: uid(), date: key + '-02', amount: round2(10 * unit), category: 'Mobile & Internet', reason: 'Monthly phone recharge', type: 'need', method: 'UPI / Wallet' });
-      for (var i = 0; i < count; i++) {
-        var t = templates[Math.floor(rnd() * templates.length)];
-        if (t[1] === 'Mobile & Internet') t = templates[0];
-        // Food grows month over month so the guide has something to say
-        var boost = t[1] === 'Food & Snacks' ? 1 + (delta + 2) * 0.25 : 1;
-        var day = 1 + Math.floor(rnd() * lastDay);
-        s.expenses.push({
-          id: uid(), date: key + '-' + pad(day),
-          amount: round2(t[0] * unit * (0.7 + rnd() * 0.6) * boost),
-          category: t[1], reason: t[2], type: t[3],
-          method: rnd() > 0.5 ? 'Cash' : 'UPI / Wallet'
-        });
-      }
-    });
-    s.settings.goalName = 'New headphones';
-    s.settings.goalAmount = round2(allowance * 1.5);
-    s.settings.limits = { 'Food & Snacks': round2(allowance * 0.3), 'Entertainment': round2(allowance * 0.15) };
-    return s;
-  }
-
   var state = load();
-  if (!state) { state = sampleState(guessCurrency()); save(); }
+  // Older versions shipped example data; never carry it forward
+  if (!state || state.sample) state = emptyState(state && state.settings.currency);
   var view = { month: currentMonthKey(), tab: 'overview', editing: null };
 
   /* ---------- money formatting ---------- */
@@ -443,7 +590,7 @@
     $$('.js-month-label').forEach(function (el) { el.textContent = monthLabel(view.month); });
     var sym = currencySymbol();
     $$('.js-cur').forEach(function (el) { el.textContent = sym; });
-    $('#sampleBanner').hidden = !state.sample;
+    $('#welcome').hidden = hasData(state) || view.tab !== 'overview';
     renderCategoryOptions();
     var a = analyze(view.month);
     var insights = buildInsights(a);
@@ -452,6 +599,7 @@
     if (view.tab === 'stats') renderStats(a);
     if (view.tab === 'guide') renderGuide(a, insights);
     if (view.tab === 'settings') renderSettings();
+    renderAccount();
   }
 
   function renderCategoryOptions() {
@@ -902,11 +1050,16 @@
     $$('.tab').forEach(function (b) { b.setAttribute('aria-selected', b.dataset.tab === tab ? 'true' : 'false'); });
     $$('.panel').forEach(function (p) { p.hidden = p.dataset.panel !== tab; });
     try { sessionStorage.setItem(STORE_KEY + '.tab', tab); } catch (e) { /* ignore */ }
-    try { if (location.hash.slice(1) !== tab) history.replaceState(null, '', '#' + tab); } catch (e) { /* sandboxed frame */ }
+    try { if (location.hash.slice(1) !== tab && location.hash.indexOf('=') < 0) history.replaceState(null, '', '#' + tab); } catch (e) { /* sandboxed frame */ }
     render();
   }
   $$('.tab').forEach(function (b) { b.addEventListener('click', function () { setTab(b.dataset.tab); }); });
-  $$('[data-goto]').forEach(function (b) { b.addEventListener('click', function () { setTab(b.dataset.goto); window.scrollTo(0, 0); }); });
+  $$('[data-goto]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      setTab(b.dataset.goto); window.scrollTo(0, 0);
+      if (b.hasAttribute('data-focus')) $(b.getAttribute('data-focus')).focus({ preventScroll: true });
+    });
+  });
 
   function setMonth(key) {
     if (!/^\d{4}-\d{2}$/.test(key)) return;
@@ -1084,7 +1237,7 @@
       try {
         var parsed = JSON.parse(r.result);
         if (!parsed || !Array.isArray(parsed.expenses)) throw new Error('bad');
-        state = normalize(parsed); state.sample = false; fmtCache = {};
+        state = normalize(parsed); fmtCache = {};
         save(); render(); toast('Backup restored');
       } catch (err) { toast('That file is not a Pocket Ledger backup. Choose the .json file you downloaded from this page.'); }
       e.target.value = '';
@@ -1098,10 +1251,76 @@
     state = emptyState(state.settings.currency); save();
     $('#resetConfirm').hidden = true; render(); toast('All data deleted');
   });
-  $('#clearSample').addEventListener('click', function () {
-    state = emptyState(state.settings.currency); save();
-    view.month = currentMonthKey(); setTab('overview');
-    $('#allowanceInput').focus();
+
+  function authFields() {
+    var email = $('#authEmail').value.trim(), password = $('#authPassword').value;
+    if (!email || !/\S+@\S+\.\S+/.test(email)) { authMsg('Enter your email address.', true); $('#authEmail').focus(); return null; }
+    if (password.length < 6) { authMsg('Your password needs at least 6 characters.', true); $('#authPassword').focus(); return null; }
+    return { email: email, password: password };
+  }
+  function siteUrl() { return location.origin + location.pathname; }
+  function busy(btn, on) { btn.disabled = on; btn.setAttribute('aria-busy', on ? 'true' : 'false'); }
+  $('#authForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var f = authFields(); if (!f || !acct.client) return;
+    var btn = $('#signInBtn'); busy(btn, true); authMsg('Signing in…');
+    acct.client.auth.signInWithPassword(f).then(function (r) {
+      busy(btn, false);
+      if (r.error) {
+        var m = r.error.message || '';
+        authMsg(/confirm/i.test(m) ? 'Your email is not confirmed yet. Tap the link in the email we sent you, then sign in.'
+          : /invalid/i.test(m) ? 'That email and password don\'t match. Check them, or tap Create account if you are new.' : m, true);
+        return;
+      }
+      $('#authPassword').value = '';
+      authMsg('Signed in. Your data is now saved online.');
+    });
+  });
+  $('#signUpBtn').addEventListener('click', function () {
+    var f = authFields(); if (!f || !acct.client) return;
+    var btn = $('#signUpBtn'); busy(btn, true); authMsg('Creating your account…');
+    acct.client.auth.signUp({ email: f.email, password: f.password, options: { emailRedirectTo: siteUrl() } }).then(function (r) {
+      busy(btn, false);
+      if (r.error) { authMsg(r.error.message, true); return; }
+      $('#authPassword').value = '';
+      if (!r.data.session) authMsg('Almost done: we sent a confirmation link to ' + f.email + '. Tap it, then come back here and sign in.');
+      else authMsg('Account created. Your data is now saved online.');
+    });
+  });
+  $('#forgotBtn').addEventListener('click', function () {
+    var email = $('#authEmail').value.trim();
+    if (!email) { authMsg('Enter your email address first, then tap Forgot password.', true); $('#authEmail').focus(); return; }
+    acct.client.auth.resetPasswordForEmail(email, { redirectTo: siteUrl() }).then(function (r) {
+      authMsg(r.error ? r.error.message : 'We sent a password reset link to ' + email + '. Open it on this device.', !!r.error);
+    });
+  });
+  $('#acctRecovery').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var pw = $('#newPassword').value;
+    if (pw.length < 6) { authMsg('Your new password needs at least 6 characters.', true); return; }
+    acct.client.auth.updateUser({ password: pw }).then(function (r) {
+      if (r.error) { authMsg(r.error.message, true); return; }
+      acct.recovery = false; $('#newPassword').value = '';
+      authMsg('Password updated.');
+      renderAccount();
+    });
+  });
+  $('#signOutBtn').addEventListener('click', function () {
+    if (!acct.client) return;
+    var btn = $('#signOutBtn'); busy(btn, true);
+    // Let pending uploads finish so nothing is lost
+    acct.chain.then(function () { return acct.client.auth.signOut(); }).then(function () {
+      busy(btn, false);
+      acct.user = null; acct.synced = null; acct.status = 'signedout';
+      state = emptyState(state.settings.currency);
+      setOwner(null); saveLocal(); render();
+      authMsg('Signed out. Your data is safe in your account; sign in again to see it.');
+    });
+  });
+  $('#acctChip').addEventListener('click', function () {
+    setTab('settings');
+    $('#accountCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!acct.user) $('#authEmail').focus({ preventScroll: true });
   });
 
   var resizeTimer;
@@ -1121,6 +1340,7 @@
   if (!document.querySelector('[data-panel="' + startTab + '"]')) {
     try { startTab = sessionStorage.getItem(STORE_KEY + '.tab') || 'overview'; } catch (e) { startTab = 'overview'; }
   }
+  acctInit();
   setTab(startTab);
   setSyncStatus('local');
   cloudInit();
