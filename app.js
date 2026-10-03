@@ -99,6 +99,79 @@
   }
   function save() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
+    cloudPush();
+  }
+
+  /* ---------- account sync (only when hosted as a Claude artifact) ----------
+     Data is kept in the viewer's private subtree: one "meta" doc for settings
+     and months, plus one doc per month of expenses ("m-YYYY-MM"). */
+  var cloud = { db: null, base: null, written: {}, chain: Promise.resolve(), status: 'local' };
+  function cloudDocs(s) {
+    var docs = { meta: { version: 1, sample: s.sample, settings: s.settings, months: s.months } };
+    s.expenses.forEach(function (e) {
+      var id = 'm-' + monthKeyOf(e.date);
+      (docs[id] = docs[id] || { expenses: [] }).expenses.push(e);
+    });
+    Object.keys(cloud.written).forEach(function (id) { if (!docs[id]) docs[id] = { expenses: [] }; });
+    return docs;
+  }
+  function cloudPush() {
+    if (!cloud.db) return;
+    var docs = cloudDocs(state);
+    Object.keys(docs).forEach(function (id) {
+      var json = JSON.stringify(docs[id]);
+      if (cloud.written[id] === json) return;
+      cloud.written[id] = json;
+      var body = JSON.parse(json);
+      cloud.chain = cloud.chain.then(function () {
+        return cloud.db.collection(cloud.base).doc(id).set(body).then(function () {
+          setSyncStatus('cloud');
+        }, function () {
+          delete cloud.written[id];
+          setSyncStatus('error');
+        });
+      });
+    });
+  }
+  function setSyncStatus(st) {
+    cloud.status = st;
+    var el = document.getElementById('syncStatus');
+    if (!el) return;
+    el.textContent = st === 'cloud' ? 'Saved to your Claude account. Open this page on any device where you are signed in to see the same data.'
+      : st === 'error' ? 'Could not save to your account just now. Your latest changes are kept on this device and will sync after your next change.'
+      : 'Saved only in this browser. Download a backup now and then so you never lose it.';
+  }
+  function cloudInit() {
+    if (!window.claude || typeof window.claude.use !== 'function') return;
+    Promise.all([window.claude.use('user'), window.claude.use('db')]).then(function (r) {
+      var user = r[0], db = r[1];
+      if (!user || !db) return null;
+      return user.id().then(function (id) {
+        if (!id) return null;
+        var base = 'data/users/' + id;
+        return db.collection(base).get().then(function (snap) {
+          cloud.db = db; cloud.base = base;
+          if (!snap.empty) {
+            var meta = {}, expenses = [];
+            snap.docs.forEach(function (d) {
+              var body = d.data() || {};
+              cloud.written[d.id] = JSON.stringify(body);
+              if (d.id === 'meta') meta = body;
+              else if (Array.isArray(body.expenses)) expenses = expenses.concat(body.expenses);
+            });
+            var merged = JSON.parse(JSON.stringify(meta));
+            merged.expenses = JSON.parse(JSON.stringify(expenses));
+            state = normalize(merged);
+            fmtCache = {};
+            try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
+            render();
+          } else if (!state.sample) {
+            cloudPush();
+          }
+          setSyncStatus('cloud');
+        });
+      });
+    }).catch(function () { setSyncStatus('local'); });
   }
   function monthData(key) {
     if (!state.months[key]) state.months[key] = { allowance: 0, savingTarget: 0, extras: [] };
@@ -829,7 +902,7 @@
     $$('.tab').forEach(function (b) { b.setAttribute('aria-selected', b.dataset.tab === tab ? 'true' : 'false'); });
     $$('.panel').forEach(function (p) { p.hidden = p.dataset.panel !== tab; });
     try { sessionStorage.setItem(STORE_KEY + '.tab', tab); } catch (e) { /* ignore */ }
-    if (location.hash.slice(1) !== tab) history.replaceState(null, '', '#' + tab);
+    try { if (location.hash.slice(1) !== tab) history.replaceState(null, '', '#' + tab); } catch (e) { /* sandboxed frame */ }
     render();
   }
   $$('.tab').forEach(function (b) { b.addEventListener('click', function () { setTab(b.dataset.tab); }); });
@@ -975,6 +1048,17 @@
   });
 
   function download(name, content, type) {
+    var host = window.claude && typeof window.claude.use === 'function' ? window.claude.use('downloads') : Promise.resolve(null);
+    host.then(function (d) {
+      if (d) {
+        return d.save({ filename: name, data: content }).catch(function (err) {
+          if (!err || err.code !== 'declined') toast('This file could not be downloaded here.');
+        });
+      }
+      anchorDownload(name, content, type);
+    }, function () { anchorDownload(name, content, type); });
+  }
+  function anchorDownload(name, content, type) {
     var blob = new Blob([content], { type: type });
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = name;
@@ -1038,4 +1122,6 @@
     try { startTab = sessionStorage.getItem(STORE_KEY + '.tab') || 'overview'; } catch (e) { startTab = 'overview'; }
   }
   setTab(startTab);
+  setSyncStatus('local');
+  cloudInit();
 })();
